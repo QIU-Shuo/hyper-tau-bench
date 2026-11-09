@@ -1246,6 +1246,12 @@ def build_construction_kit(
             src_doc = framework_src / doc_name
             if src_doc.exists():
                 shutil.copy2(src_doc, framework_dest / doc_name)
+        # τ^τ-Verified: the contract states the runtime facts it omits.
+        from tau2.hyper.verified import verified_agent_contract, verified_enabled
+
+        contract_doc = framework_dest / "agent_contract.md"
+        if verified_enabled() and contract_doc.exists():
+            contract_doc.write_text(verified_agent_contract(contract_doc.read_text()))
         interface_description = "How to write agent tools backed by the Client REST API"
         (framework_dest / "README.md").write_text(
             "# Agent Framework Reference\n\n"

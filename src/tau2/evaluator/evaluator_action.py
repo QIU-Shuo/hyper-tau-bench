@@ -1,4 +1,5 @@
-from typing import Optional
+import re
+from typing import Optional, get_args
 
 from tau2.data_model.message import (
     AssistantMessage,
@@ -12,6 +13,48 @@ from tau2.data_model.simulation import ActionCheck, RewardInfo
 from tau2.data_model.tasks import Action, RewardType, Task
 from tau2.environment.toolkit import ToolType
 from tau2.evaluator.evaluator_base import EvaluatorBase
+
+TRANSFER_TOOL = "transfer_to_human_agents"
+
+
+def _reason_from_summary(gold_action: Action) -> bool:
+    """Whether a transfer's reason is read from its summary (τ^τ-Verified).
+
+    The Client API transfer body accepts only `summary`, so a replayed transfer
+    carries no `reason`, and gold that compares `reason` could never match.
+    """
+    if gold_action.name != TRANSFER_TOOL:
+        return False
+    if "reason" not in (gold_action.compare_args or []):
+        return False
+    from tau2.hyper.verified import verified_enabled
+
+    return verified_enabled()
+
+
+def _with_summary_reason(tool_call: ToolCall) -> ToolCall:
+    """Fill a transfer's missing `reason` with the one reason code in its summary.
+
+    No code, or several distinct codes, leave the call without a reason, so
+    listing every code cannot match. `other` is not searched for, because it
+    is also an ordinary word.
+    """
+    if tool_call.name != TRANSFER_TOOL or "reason" in tool_call.arguments:
+        return tool_call
+    from tau2.domains.banking_knowledge.tools import TransferReasonLiteral
+
+    summary = str(tool_call.arguments.get("summary", ""))
+    codes = [code for code in get_args(TransferReasonLiteral) if code != "other"]
+    found = {
+        code
+        for code in codes
+        if re.search(rf"(?<![a-z0-9_]){code}(?![a-z0-9_])", summary, re.IGNORECASE)
+    }
+    if len(found) != 1:
+        return tool_call
+    return tool_call.model_copy(
+        update={"arguments": {**tool_call.arguments, "reason": found.pop()}}
+    )
 
 
 def _check_actions(
@@ -32,8 +75,11 @@ def _check_actions(
     """
     action_checks = []
     for gold_action in golden_actions:
+        candidates = predicted_tool_calls
+        if _reason_from_summary(gold_action):
+            candidates = [_with_summary_reason(call) for call in predicted_tool_calls]
         found = False
-        for pred_tool_call in predicted_tool_calls:
+        for pred_tool_call in candidates:
             if gold_action.compare_with_tool_call(pred_tool_call):
                 found = True
                 break

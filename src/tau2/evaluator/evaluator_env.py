@@ -103,6 +103,16 @@ def _hashes_for_compare(
                 predicted_env.user_tools.db, gold_env.user_tools.db
             )
             gold_user_state = gold_env.user_tools.db.model_dump(mode="json")
+            from tau2.hyper.verified import verified_enabled
+
+            if verified_enabled():
+                # τ^τ-Verified: in banking the user tools share the agent's
+                # database, so the agent-side audit table is in the user state
+                # too. Gold writes a row there through the discoverable-tool
+                # wrapper and the Client API writes none, so drop it on this
+                # side as well.
+                pred_user_state = _drop_construction_agent_audit_tables(pred_user_state)
+                gold_user_state = _drop_construction_agent_audit_tables(gold_user_state)
             pred_user_state, gold_user_state = canonicalize_new_ids(
                 pred_user_state,
                 gold_user_state,
