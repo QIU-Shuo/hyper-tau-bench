@@ -1419,7 +1419,9 @@ def _build_hyper_tau_llm_args(
 
     args_dict: dict = {}
 
-    if reasoning_effort and model.startswith("gpt-5"):
+    # GPT-6 models take reasoning_effort too; upstream passed it to
+    # gpt-5.* only, so a gpt-6.1-sol Developer ran at the default effort.
+    if reasoning_effort and model.startswith(("gpt-5", "gpt-6")):
         args_dict["reasoning_effort"] = reasoning_effort
 
     if thinking_budget and "claude" in model:

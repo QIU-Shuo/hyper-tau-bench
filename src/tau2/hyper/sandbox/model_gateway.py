@@ -74,7 +74,11 @@ _REQUEST_HEADERS = {
     "anthropic-beta",
     "anthropic-version",
     "content-type",
+    # Codex's session headers. The ChatGPT subscription backend
+    # serves cached input only for requests that carry session_id.
+    "conversation_id",
     "openai-beta",
+    "session_id",
     "traceparent",
     "tracestate",
     "user-agent",
@@ -478,6 +482,19 @@ class ModelGatewayRequestHandler(BaseHTTPRequestHandler):
                 headers["OpenAI-Project"] = self.upstream_project
         else:
             headers["x-api-key"] = self.upstream_api_key
+        # When Codex sends no session_id, key the ChatGPT backend's
+        # cache on the request's own prompt_cache_key (the Codex thread id).
+        if (
+            self.provider == "chatgpt"
+            and self.command == "POST"
+            and not any(key.lower() == "session_id" for key in headers)
+        ):
+            try:
+                cache_key = json.loads(body or b"{}").get("prompt_cache_key")
+            except (ValueError, AttributeError):
+                cache_key = None
+            if isinstance(cache_key, str) and cache_key:
+                headers["session_id"] = cache_key
 
         upstream_url = f"{self.upstream_origin}/{upstream_path}"
         if parsed.query:

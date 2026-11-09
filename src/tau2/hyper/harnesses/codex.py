@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 
 from tau2.hyper.sandbox.builder import BuildStep
 from tau2.hyper.sandbox.native_builder import NativeSandboxBuilder
 from tau2.hyper.sandbox.native_runtime import NativeProcessEvent
 
-CODEX_HARNESS_VERSION = "0.144.6"
+# A run on an image with another Codex release names it here so the
+# build metadata records the version that actually ran.
+CODEX_HARNESS_VERSION = os.environ.get("TAU2_CODEX_HARNESS_VERSION", "0.144.6")
 
 
 class CodexSandboxBuilder(NativeSandboxBuilder):
@@ -16,8 +20,17 @@ class CodexSandboxBuilder(NativeSandboxBuilder):
 
     harness_name = "codex"
     harness_version = CODEX_HARNESS_VERSION
-    model_gateway_provider = "openai"
+    # TAU2_CODEX_GATEWAY_PROVIDER names a model_routing.toml provider
+    # for the Developer seat only (e.g. the ChatGPT subscription backend), so
+    # providers.openai can keep serving the inner loop.
+    model_gateway_provider = os.environ.get("TAU2_CODEX_GATEWAY_PROVIDER", "openai")
     runtime_config_path = "/runtime-home/.codex/config.toml"
+    # TAU2_CODEX_MODEL_CATALOG names a host JSON model catalog that
+    # replaces Codex's bundled one. The app-server drops a turn's reasoning
+    # effort when its catalog does not list the model, so a Developer model
+    # newer than this Codex release would otherwise run at the default effort.
+    model_catalog_host_path = os.environ.get("TAU2_CODEX_MODEL_CATALOG")
+    model_catalog_path = "/runtime-home/.codex/model_catalog.json"
 
     def harness_config_metadata(self) -> dict:
         return {
@@ -63,10 +76,16 @@ class CodexSandboxBuilder(NativeSandboxBuilder):
             if reasoning_effort and reasoning_effort != "none"
             else ""
         )
+        catalog_line = (
+            f"model_catalog_json = {json.dumps(self.model_catalog_path)}\n"
+            if self.model_catalog_host_path
+            else ""
+        )
         return (
             f"model = {json.dumps(self.llm)}\n"
             'model_provider = "tau2_gateway"\n'
             f"{reasoning_line}"
+            f"{catalog_line}"
             'approval_policy = "never"\n'
             'sandbox_mode = "danger-full-access"\n'
             "allow_login_shell = false\n"
@@ -83,9 +102,14 @@ class CodexSandboxBuilder(NativeSandboxBuilder):
             'exclude = ["TAU2_MODEL_GATEWAY_TOKEN"]\n'
             "\n[model_providers.tau2_gateway]\n"
             'name = "Hyper-tau model gateway"\n'
-            'base_url = "http://tau2-model-gateway:8143/openai/v1"\n'
+            f'base_url = "http://tau2-model-gateway:8143/{self.model_gateway_provider}/v1"\n'
             'env_key = "TAU2_MODEL_GATEWAY_TOKEN"\n'
             'wire_api = "responses"\n'
+            # Ride out provider token-rate-limit windows (Codex
+            # backs off 0.2 s x 2^n; 12 retries wait up to ~14 min in total)
+            # instead of failing the turn after the default 5 quick retries.
+            "request_max_retries = 12\n"
+            "stream_max_retries = 12\n"
             "supports_websockets = false\n"
             "supports_standalone_web_search = false\n"
             "\n[features]\n"
@@ -114,6 +138,14 @@ class CodexSandboxBuilder(NativeSandboxBuilder):
             '"TAU2_SAMPLE_SCENARIOS_TOOL_ENABLED", '
             '"PATH", "PYTHONPATH", "TAU2_DATA_DIR"]\n'
         )
+
+    def runtime_files(self, **kwargs) -> dict[str, str]:
+        files = super().runtime_files(**kwargs)
+        if self.model_catalog_host_path:
+            files[self.model_catalog_path] = Path(
+                self.model_catalog_host_path
+            ).read_text()
+        return files
 
     def harness_command(self) -> list[str]:
         return ["python", "-m", "tau2.hyper.harnesses.codex_driver"]
