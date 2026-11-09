@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import tempfile
 import threading
@@ -17,6 +18,21 @@ if TYPE_CHECKING:
         LiveExperimentContext,
         SampleScenariosContext,
     )
+
+
+def _write_response_file(path: Path, text: str) -> None:
+    """Create and write ``path`` without following or reusing an existing node.
+
+    O_NOFOLLOW makes open fail if ``path`` is a symlink; O_EXCL makes it fail if
+    anything already exists there. Either way the host writes only a file it
+    just created inside the callback directory, never through a planted link.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    try:
+        os.write(fd, text.encode())
+    finally:
+        os.close(fd)
 
 
 class CallbackBrokerError(RuntimeError):
@@ -196,7 +212,9 @@ class CallbackBroker:
 
                 response_path = self.callback_dir / f"response-{request_id}.json"
                 temporary_path = self.callback_dir / f".response-{request_id}.tmp"
-                temporary_path.write_text(json.dumps(response))
+                # The Developer owns this directory and picks request_id, so
+                # the host must not write through a link planted at this path.
+                _write_response_file(temporary_path, json.dumps(response))
                 temporary_path.replace(response_path)
 
     def metadata(self) -> dict:

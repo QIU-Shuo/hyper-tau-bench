@@ -79,6 +79,22 @@ from tau2.runner.build import load_tasks_from_file
 _KIT_BASELINE_MESSAGE = "Initial import"
 
 
+# The Developer is root in a read-write mount of the whole kit, its `.git`
+# included, and git runs programs that a repository's config names (fsmonitor,
+# hooks, clean filters, diff drivers). So host git never reads the kit's `.git`
+# config: it works from a git directory of its own and borrows only the kit's
+# objects, which the baseline commit id pins.
+def _host_git_env(git_dir: Path, kit_path: Path) -> dict[str, str]:
+    """Environment for host git over a Developer-writable kit."""
+    env = dict(os.environ)
+    env["GIT_DIR"] = str(git_dir)
+    env["GIT_WORK_TREE"] = str(kit_path)
+    env["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = str(kit_path / ".git" / "objects")
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    return env
+
+
 def _get_git_sha() -> Optional[str]:
     """Return the current repository commit SHA when available."""
     repo_root = Path(__file__).resolve().parents[4]
@@ -172,28 +188,46 @@ def _classify_workspace_provenance(
     if baseline_commit is None:
         return None, []
 
-    def _run_git(*args: str) -> Optional[str]:
-        result = subprocess.run(
-            ["git", *args],
-            cwd=kit_path,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode != 0:
-            logger.warning(
-                f"Workspace provenance git call failed ({args[0]}): "
-                f"{result.stderr.strip() or result.stdout.strip()}"
-            )
-            return None
-        return result.stdout
+    with tempfile.TemporaryDirectory(prefix="tau2-host-git-") as scratch:
+        git_dir = Path(scratch) / ".git"
+        env = _host_git_env(git_dir, kit_path)
 
-    diff_output = _run_git(
-        "diff", "--name-status", "--no-renames", baseline_commit, "--", "workspace"
-    )
-    untracked_output = _run_git(
-        "ls-files", "--others", "--exclude-standard", "--", "workspace"
-    )
+        def _run_git(*args: str) -> Optional[str]:
+            result = subprocess.run(
+                ["git", *args],
+                cwd=kit_path,
+                capture_output=True,
+                text=True,
+                check=False,
+                env=env,
+            )
+            if result.returncode != 0:
+                logger.warning(
+                    f"Workspace provenance git call failed ({args[0]}): "
+                    f"{result.stderr.strip() or result.stdout.strip()}"
+                )
+                return None
+            return result.stdout
+
+        # The index starts as the baseline tree, so the comparison does not
+        # depend on what the Developer staged either.
+        if (
+            _run_git("init", "--quiet", "--template=", scratch) is None
+            or _run_git("read-tree", baseline_commit) is None
+        ):
+            return None, []
+        diff_output = _run_git(
+            "diff",
+            "--name-status",
+            "--no-renames",
+            "--ignore-submodules=all",
+            baseline_commit,
+            "--",
+            "workspace",
+        )
+        untracked_output = _run_git(
+            "ls-files", "--others", "--exclude-standard", "--", "workspace"
+        )
     if diff_output is None or untracked_output is None:
         return None, []
 
